@@ -489,7 +489,7 @@ function safeParseJSON(key, fallback = '[]') {
     }
     return [];
   }
-
+}
 
 
 // Wishlist logic has been migrated to app.js for global availability.
@@ -500,13 +500,12 @@ function safeParseJSON(key, fallback = '[]') {
  * @param {string} text - The original text to display
  * @param {string} query - The search query term
  */
-function appendHighlightedText(target, text, query) {
+function appendHighlightedText(target, text, query, highlightRanges) {
   const safeText = String(text || '');
   const safeQuery = String(query || '').trim();
 
-  target.textContent = '';
+  target.textContent = safeText;
   if (!safeText || !safeQuery) {
-    target.textContent = safeText;
     return;
   }
 
@@ -514,26 +513,22 @@ function appendHighlightedText(target, text, query) {
   const lowerQuery = safeQuery.toLowerCase();
   let cursor = 0;
 
+  const textNode = target.firstChild;
+  if (!textNode) return;
+
   while (cursor < safeText.length) {
     const matchIndex = lowerText.indexOf(lowerQuery, cursor);
     if (matchIndex === -1) {
-      target.appendChild(document.createTextNode(safeText.slice(cursor)));
       break;
     }
 
-    if (matchIndex > cursor) {
-      target.appendChild(
-        document.createTextNode(safeText.slice(cursor, matchIndex)),
-      );
+    if (highlightRanges) {
+      const range = new Range();
+      range.setStart(textNode, matchIndex);
+      range.setEnd(textNode, matchIndex + safeQuery.length);
+      highlightRanges.push(range);
     }
 
-    const highlight = document.createElement('span');
-    highlight.className = 'highlight';
-    highlight.textContent = safeText.slice(
-      matchIndex,
-      matchIndex + safeQuery.length,
-    );
-    target.appendChild(highlight);
     cursor = matchIndex + safeQuery.length;
   }
 }
@@ -546,6 +541,11 @@ function renderProducts(containerId, list, query = '') {
     const searchInput = document.getElementById('searchInput');
     query = searchInput ? searchInput.value.trim() : '';
   }
+
+  if (window.CSS && CSS.highlights) {
+    CSS.highlights.delete('search-results');
+  }
+  const highlightRanges = [];
 
   // Remove any existing static product nodes to avoid duplicates
   document.querySelectorAll('.pro').forEach((n) => n.remove());
@@ -671,12 +671,12 @@ function renderProducts(containerId, list, query = '') {
       '<svg class="pro-brand-logo" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2L2 19h20L12 2zm0 3.5L19.5 18h-15L12 5.5z"/></svg>',
     );
     const brandText = document.createElement('span');
-    appendHighlightedText(brandText, p.brand, query);
+    appendHighlightedText(brandText, p.brand, query, highlightRanges);
     brandRow.appendChild(brandText);
     des.appendChild(brandRow);
 
     const nameH5 = document.createElement('h5');
-    appendHighlightedText(nameH5, p.name, query);
+    appendHighlightedText(nameH5, p.name, query, highlightRanges);
     des.appendChild(nameH5);
 
     // Dynamic interactive star rating
@@ -695,7 +695,7 @@ function renderProducts(containerId, list, query = '') {
     buyBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      buyNow(p.name, '₹' + p.price, p.img, 1, 'M');
+      window.buyNow(p.name, p.price, p.img, 1);
     });
     actionBar.appendChild(buyBtn);
 
@@ -706,7 +706,7 @@ function renderProducts(containerId, list, query = '') {
     cartBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      addToCart(p.name, '₹' + p.price, p.img, 1, 'M');
+      window.addToCart(p.name, p.price, p.img, 1);
     });
     const cartIcon = document.createElement('i');
     cartIcon.className = 'ri-shopping-cart-2-line';
@@ -741,6 +741,11 @@ function renderProducts(containerId, list, query = '') {
     card.appendChild(des);
     container.appendChild(card);
   });
+
+  if (window.CSS && CSS.highlights && highlightRanges.length > 0) {
+    const searchHighlight = new Highlight(...highlightRanges);
+    CSS.highlights.set('search-results', searchHighlight);
+  }
 }
 
 function updateSearchSummary(filteredCount) {
@@ -892,40 +897,6 @@ function attachSearchListeners() {
       filterProducts();
       input && input.focus();
     });
-  }
-}
-
-/**
- * Resolves #1691
- * Adds an item to the cart and persists it to localStorage.
- */
-function addToCart(name, price, img, quantity, size) {
-  const cart = safeParseJSON('productsInCart');
-  cart.push({ name, price, img, quantity, size, id: Date.now() });
-  try {
-    localStorage.setItem('productsInCart', JSON.stringify(cart));
-    if (typeof showToast === 'function') {
-      showToast(name + ' added to cart!', 'success');
-    }
-  } catch (e) {
-    window.logError('Failed to save cart:', e);
-    if (typeof showToast === 'function') {
-      showToast('Storage limit reached! Cannot add to cart.', 'error');
-    }
-  }
-}
-
-function buyNow(name, price, img, quantity, size) {
-  const cart = safeParseJSON('productsInCart');
-  cart.push({ name, price, img, quantity, size, id: Date.now() });
-  try {
-    localStorage.setItem('productsInCart', JSON.stringify(cart));
-    window.location.href = 'checkout.html';
-  } catch (e) {
-    window.logError('Failed to save cart:', e);
-    if (typeof showToast === 'function') {
-      showToast('Storage limit reached! Cannot proceed to checkout.', 'error');
-    }
   }
 }
 
