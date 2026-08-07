@@ -17,10 +17,19 @@ import random
 import secrets
 import hashlib
 from collections import OrderedDict
+import hmac
 
 # In-memory tracking of failed attempts with an LRU bound to prevent OOM DOS attacks
 failed_login_attempts = OrderedDict()
 MAX_TRACKED_EMAILS = 1000
+
+# Pending server-side CAPTCHA challenges (challenge id -> expiry). Storing the
+# challenge on the server lets us compare the submitted answer against an HMAC
+# digest instead of embedding the plaintext answer in the JWT, and lets us
+# consume each challenge after a single verification attempt.
+captcha_challenges = OrderedDict()
+MAX_TRACKED_CAPTCHAS = 1000
+CAPTCHA_MINUTES = 5
 
 SECRET_KEY = os.environ.get("SECRET_KEY")
 if not SECRET_KEY:
@@ -31,10 +40,35 @@ if not SECRET_KEY:
 ALGORITHM  = "HS256"
 ACCESS_TOKEN_MINUTES = 15
 REFRESH_TOKEN_DAYS = 7
+COOKIE_SAMESITE = "lax"
+COOKIE_PATH = "/"
+
+# email -> currently valid refresh token jti (rotation / revoke store)
+active_refresh_jtis: dict[str, str] = {}
 
 pwd    = CryptContext(schemes=["bcrypt"], deprecated="auto")
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+
+
+def cookie_secure() -> bool:
+    return os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "true", "yes")
+
+
+def _captcha_hmac(code: str) -> str:
+    """Keyed digest of a CAPTCHA answer; the plaintext is never put in the JWT."""
+    return hmac.new(
+        SECRET_KEY.encode("utf-8"),
+        code.upper().encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _store_captcha_challenge(challenge_id: str) -> None:
+    captcha_challenges[challenge_id] = datetime.now(timezone.utc) + timedelta(minutes=CAPTCHA_MINUTES)
+    captcha_challenges.move_to_end(challenge_id)
+    if len(captcha_challenges) > MAX_TRACKED_CAPTCHAS:
+        captcha_challenges.popitem(last=False)
 
 
 # -- Helper: build JWT --
@@ -50,33 +84,60 @@ def create_access_token(email: str) -> str:
     )
 
 def create_refresh_token(email: str) -> str:
-    return jwt.encode(
+    jti = secrets.token_urlsafe(32)
+    token = jwt.encode(
         {
             "sub": email,
             "type": "refresh",
-            "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_DAYS)
+            "jti": jti,
+            "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_DAYS),
         },
         SECRET_KEY,
-        algorithm=ALGORITHM
+        algorithm=ALGORITHM,
     )
+    active_refresh_jtis[email] = jti
+    return token
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    secure = cookie_secure()
     response.set_cookie(
         key="access_token",
         value=f"Bearer {access_token}",
         httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=ACCESS_TOKEN_MINUTES * 60
+        secure=secure,
+        samesite=COOKIE_SAMESITE,
+        path=COOKIE_PATH,
+        max_age=ACCESS_TOKEN_MINUTES * 60,
     )
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=REFRESH_TOKEN_DAYS * 24 * 60 * 60
+        secure=secure,
+        samesite=COOKIE_SAMESITE,
+        path=COOKIE_PATH,
+        max_age=REFRESH_TOKEN_DAYS * 24 * 60 * 60,
     )
+
+def clear_auth_cookies(response: Response):
+    # Flags must match set_cookie or browsers may keep the session cookies.
+    secure = cookie_secure()
+    for key in ("access_token", "refresh_token"):
+        response.delete_cookie(
+            key,
+            path=COOKIE_PATH,
+            secure=secure,
+            samesite=COOKIE_SAMESITE,
+        )
+
+def revoke_refresh_token(email: str | None):
+    if email:
+        active_refresh_jtis.pop(email, None)
+
+def assert_refresh_jti(email: str, jti: str | None):
+    expected = active_refresh_jtis.get(email)
+    if not jti or not expected or not hmac.compare_digest(expected, jti):
+        raise HTTPException(401, "Invalid or revoked refresh token.")
 
 # -- Helper: get current user from token --
 def get_current_user(
@@ -161,9 +222,19 @@ def get_captcha():
     buffered = io.BytesIO()
     img.save(buffered, format="PNG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
-    
+
+    # The token carries only an opaque challenge id and an HMAC digest of the
+    # answer, never the answer itself. The challenge must be solved server-side
+    # and is consumed after a single verification attempt (see login).
+    challenge_id = secrets.token_urlsafe(16)
+    _store_captcha_challenge(challenge_id)
+
     token = jwt.encode(
-        {"captcha_answer": code, "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+        {
+            "captcha_challenge": challenge_id,
+            "captcha_hash": _captcha_hmac(code),
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=CAPTCHA_MINUTES),
+        },
         SECRET_KEY,
         algorithm=ALGORITHM
     )
@@ -182,8 +253,22 @@ def login(request: Request, response: Response, payload: UserLogin, db: Session 
             raise HTTPException(403, "Security captcha required.")
         try:
             token_payload = jwt.decode(payload.captcha_token, SECRET_KEY, algorithms=[ALGORITHM])
-            expected = token_payload.get("captcha_answer")
-            if not expected or expected.upper() != payload.captcha_answer.upper():
+            challenge_id = token_payload.get("captcha_challenge")
+            expected_hash = token_payload.get("captcha_hash")
+            expires = captcha_challenges.get(challenge_id)
+
+            if not challenge_id or not expected_hash or expires is None:
+                raise HTTPException(403, "Invalid or expired security code.")
+            if expires < datetime.now(timezone.utc):
+                captcha_challenges.pop(challenge_id, None)
+                raise HTTPException(403, "Invalid or expired security code.")
+
+            # One-time challenge: consume it before evaluating the answer so a
+            # solved captcha cannot be replayed for later attempts.
+            captcha_challenges.pop(challenge_id, None)
+
+            submitted_hash = _captcha_hmac(payload.captcha_answer)
+            if not hmac.compare_digest(submitted_hash, expected_hash):
                 raise HTTPException(403, "Invalid security code.")
         except JWTError:
             raise HTTPException(403, "Invalid or expired security code.")
@@ -217,7 +302,7 @@ def login(request: Request, response: Response, payload: UserLogin, db: Session 
     )
 
 @router.post("/refresh")
-def refresh_token(request: Request, response: Response, db: Session = Depends(get_db)):
+def refresh_access_token(request: Request, response: Response, db: Session = Depends(get_db)):
     token = request.cookies.get("refresh_token")
     if not token:
         raise HTTPException(status_code=401, detail="Refresh token missing")
@@ -228,24 +313,19 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
         email: str = payload.get("sub")
         if not email:
             raise HTTPException(401, "Invalid token.")
+        assert_refresh_jti(email, payload.get("jti"))
     except JWTError:
         raise HTTPException(401, "Invalid or expired refresh token.")
-        
+
     user = db.query(models.User).filter(models.User.email == email).first()
     if not user or not user.is_active:
         raise HTTPException(401, "User not found or inactive.")
-        
+
     access_token = create_access_token(user.email)
-    # Issue a new access token while keeping the same refresh token
-    response.set_cookie(
-        key="access_token",
-        value=f"Bearer {access_token}",
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=ACCESS_TOKEN_MINUTES * 60
-    )
+    new_refresh_token = create_refresh_token(user.email)
+    set_auth_cookies(response, access_token, new_refresh_token)
     return {"message": "Token refreshed successfully"}
+
 
 @router.post("/forgot-password")
 @limiter.limit("5/minute")
@@ -303,9 +383,16 @@ def reset_password(
 
 
 @router.post("/logout")
-def logout(response: Response):
-    response.delete_cookie("access_token")
-    response.delete_cookie("refresh_token")
+def logout(request: Request, response: Response):
+    token = request.cookies.get("refresh_token")
+    if token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            if payload.get("type") == "refresh":
+                revoke_refresh_token(payload.get("sub"))
+        except JWTError:
+            pass
+    clear_auth_cookies(response)
     return {"message": "Successfully logged out"}
 
 @router.get("/me", response_model=UserOut)
