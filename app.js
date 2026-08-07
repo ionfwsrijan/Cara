@@ -397,7 +397,21 @@ function updateCartCount() {
     mobileCount.textContent = totalItems;
     mobileCount.classList.toggle('hidden', totalItems === 0);
   }
+
+  if ('setAppBadge' in navigator) {
+    if (totalItems > 0) {
+      navigator.setAppBadge(totalItems).catch((err) =>
+        console.error('Error setting app badge:', err)
+      );
+    } else if ('clearAppBadge' in navigator) {
+      navigator.clearAppBadge().catch((err) =>
+        console.error('Error clearing app badge:', err)
+      );
+    }
+  }
 }
+
+window.updateCartCount = updateCartCount;
 
 function updateWishlistCount() {
   let wishlist = [];
@@ -1011,7 +1025,7 @@ window.loadCart = async function () {
   if (subtotalEl) subtotalEl.innerText = formatCurrency(subtotal);
 
   let shipping = 0;
-  if (subtotal > 0) shipping = subtotal >= window.CARA_CONFIG.SHIPPING.FREE_THRESHOLD ? 0 : window.CARA_CONFIG.SHIPPING.FEE;
+  if (subtotal > 0) shipping = window.CaraShipping.computeFee(subtotal);
 
   if (shippingEl) {
     shippingEl.innerText = shipping === 0 ? 'FREE' : formatCurrency(shipping);
@@ -2414,3 +2428,4 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 });
+})();

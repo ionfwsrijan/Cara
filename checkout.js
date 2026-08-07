@@ -1,4 +1,39 @@
 let checkoutIdempotencyKey = null;
+let checkoutWakeLock = null;
+let isCheckoutProcessing = false;
+
+async function requestWakeLock() {
+  if ('wakeLock' in navigator && isCheckoutProcessing) {
+    try {
+      checkoutWakeLock = await navigator.wakeLock.request('screen');
+      checkoutWakeLock.addEventListener('release', () => {
+        console.log('Screen Wake Lock released');
+      });
+      console.log('Screen Wake Lock acquired');
+    } catch (err) {
+      console.error(`Wake Lock error: ${err.name}, ${err.message}`);
+    }
+  }
+}
+
+function releaseWakeLock() {
+  isCheckoutProcessing = false;
+  if (checkoutWakeLock !== null) {
+    checkoutWakeLock.release()
+      .catch(err => console.error(err))
+      .finally(() => {
+        checkoutWakeLock = null;
+      });
+  }
+}
+
+window.addEventListener('beforeunload', releaseWakeLock);
+window.addEventListener('unload', releaseWakeLock);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && isCheckoutProcessing) {
+    requestWakeLock();
+  }
+});
 
 function safeParseJSON(key, fallback = '[]') {
   try {
@@ -316,6 +351,9 @@ function submitCheckoutForm() {
     submitBtn.disabled = true;
   }
 
+  isCheckoutProcessing = true;
+  requestWakeLock();
+
   if (!checkoutIdempotencyKey) {
     checkoutIdempotencyKey = crypto.randomUUID();
   }
@@ -329,6 +367,7 @@ function submitCheckoutForm() {
     zip: document.getElementById('zip').value.trim(),
     coupon: window.appliedCoupon,
     idempotency_key: checkoutIdempotencyKey,
+    shipping_method: window.CaraShipping.getMethod(),
     items: cart.map((item) => ({
       product_name: item.name,
       quantity: parseInt(item.quantity, 10) || 1,
@@ -383,6 +422,10 @@ function submitCheckoutForm() {
       window.appliedCoupon = null;
       checkoutIdempotencyKey = null;
 
+      if (typeof window.updateCartCount === 'function') {
+        window.updateCartCount();
+      }
+
       if (submitBtn) {
         submitBtn.classList.remove('btn-loading');
         submitBtn.disabled = false;
@@ -391,6 +434,8 @@ function submitCheckoutForm() {
         submitBtn.innerHTML =
           submitBtn.getAttribute('data-original-html') || 'Place Order';
       }
+
+      releaseWakeLock();
 
       form.reset();
 
@@ -414,6 +459,8 @@ function submitCheckoutForm() {
         submitBtn.classList.remove('btn-loading');
         submitBtn.disabled = false;
       }
+      
+      releaseWakeLock();
     });
 }
 
@@ -459,7 +506,7 @@ function renderCheckoutItems() {
       return `
       <div class="order-item" style="display: flex; gap: 15px; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;">
         <div class="item-thumb" style="width: 50px; height: 50px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; background: #fff;">
-          <img src="${item.img || 'images/products/placeholder.jpg'}" alt="${item.name}" style="max-width: 100%; max-height: 100%; object-fit: cover;" onerror="this.src='images/products/placeholder.jpg'">
+          <img src="${item.image || item.img || 'images/products/placeholder.jpg'}" alt="${item.name}" style="max-width: 100%; max-height: 100%; object-fit: cover;" onerror="this.src='images/products/placeholder.jpg'">
         </div>
         <div class="item-info" style="flex: 1;">
           <div class="item-name" style="font-weight: 600; font-size: 14px; color: var(--color-heading);">${item.name}</div>
@@ -481,6 +528,12 @@ window.updateCheckoutSummary = function () {
       sum + Math.round(parsePriceString(item.price) * 100) * (parseInt(item.quantity, 10) || 1),
     0,
   );
+  const subtotal = subtotalCents / 100;
+
+  // Shipping fee mirrors the backend rule (flat fee below the free-shipping
+  // threshold plus an express/international surcharge) using the delivery
+  // method persisted by the cart estimator.
+  const shippingCents = Math.round(window.CaraShipping.computeFee(subtotal) * 100);
 
   // Check coupon discount
   const couponCode = localStorage.getItem('appliedCoupon') || '';
@@ -506,11 +559,17 @@ window.updateCheckoutSummary = function () {
     parseInt(localStorage.getItem('cara_applied_loyalty_points'), 10) || 0;
   const loyaltyDiscount = loyaltyPoints / (window.CARA_CONFIG ? window.CARA_CONFIG.LOYALTY.POINTS_PER_RUPEE : 10);
 
+  const taxCents = Math.round(subtotalCents * (window.CARA_CONFIG ? window.CARA_CONFIG.TAX_RATE : 0.18));
+  const giftChargeCents = Math.round(giftCharge * 100);
+  const urgencyDiscountCents = Math.round(urgencyDiscount * 100);
+  const loyaltyDiscountCents = Math.round(loyaltyDiscount * 100);
+
   // Grand Total in cents (integer, safe for Stripe)
   const grandTotalCents = Math.max(
     0,
     subtotalCents +
       taxCents +
+      shippingCents +
       giftChargeCents -
       couponDiscountCents -
       urgencyDiscountCents -
@@ -523,6 +582,12 @@ window.updateCheckoutSummary = function () {
 
   const taxEl = document.getElementById('summary-tax');
   if (taxEl) taxEl.textContent = formatCurrency(taxCents);
+
+  const shippingEl = document.getElementById('summary-shipping');
+  if (shippingEl) {
+    shippingEl.textContent =
+      shippingCents === 0 ? 'Free' : formatCurrency(shippingCents);
+  }
 
   // Update Coupon Row
   let couponRow = document.getElementById('summaryDiscountRow');
@@ -577,7 +642,7 @@ window.updateCheckoutSummary = function () {
       const divider = document.querySelector('.summary-divider');
       if (divider) divider.parentNode.insertBefore(urgencyRow, divider);
     }
-    urgencyRow.innerHTML = `<span>Urgency Promo (${window.CARA_CONFIG ? window.CARA_CONFIG.URGENCY_DISCOUNT_PCT * 100 : 5}%)</span><span id='urgency-discount-val'>-${formatCurrency(urgencyDiscount)}</span>`;
+    urgencyRow.innerHTML = `<span>Urgency Promo (${window.CARA_CONFIG ? window.CARA_CONFIG.URGENCY_DISCOUNT_PCT * 100 : 5}%)</span><span id='urgency-discount-val'>-${formatCurrency(urgencyDiscountCents)}</span>`;
   } else {
     if (urgencyRow) urgencyRow.remove();
   }
