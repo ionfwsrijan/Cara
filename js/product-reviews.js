@@ -95,14 +95,19 @@ export class ProductReviewManager {
 
     const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
     let sum = 0;
+    let ratedCount = 0;
 
     productReviews.forEach((rev) => {
-      const r = Math.min(5, Math.max(1, rev.rating));
-      distribution[r] = (distribution[r] || 0) + 1;
+      const raw = Number(rev.rating);
+      if (!Number.isFinite(raw)) return; // Skip corrupt legacy entries
+      const r = Math.min(5, Math.max(1, raw));
+      distribution[Math.round(r)] = (distribution[Math.round(r)] || 0) + 1;
       sum += r;
+      ratedCount += 1;
     });
 
-    const averageRating = parseFloat((sum / productReviews.length).toFixed(1));
+    const averageRating =
+      ratedCount > 0 ? parseFloat((sum / ratedCount).toFixed(1)) : 0;
 
     return {
       totalReviews: productReviews.length,
@@ -110,4 +115,19 @@ export class ProductReviewManager {
       distribution,
     };
   }
+
+  /**
+   * Strips HTML tags and dangerous characters from a review author name.
+   * @param {string} name
+   * @returns {string}
+   */
+  sanitizeReviewAuthorName(name) {
+    if (typeof name !== 'string') return '';
+    return name
+      .replace(/<[^>]*>/g, '')   // Remove HTML tags
+      .replace(/[<>"'&]/g, '')     // Remove XSS characters
+      .trim()
+      .slice(0, 80);               // Cap at 80 chars
+  }
+
 }

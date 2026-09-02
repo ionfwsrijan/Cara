@@ -3,7 +3,7 @@
  * Tests ARIA live region announcement management for screen readers.
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { initAnnouncer, announce } from '../../js/a11y-announcer.js';
+import { initAnnouncer, announce, clearAnnouncements } from '../../js/a11y-announcer.js';
 
 describe('a11y-announcer Unit Tests', () => {
   beforeEach(() => {
@@ -72,5 +72,27 @@ describe('a11y-announcer Unit Tests', () => {
       const polite = document.getElementById('a11y-announcer-polite');
       expect(polite.textContent).toBe('Cart updated');
     });
+  });
+
+  it('should clear live region text when clearAnnouncements is called', () => {
+    initAnnouncer();
+    const polite = document.getElementById('a11y-announcer-polite');
+    polite.textContent = 'Stale text';
+    clearAnnouncements();
+    expect(polite.textContent).toBe('');
+  });
+
+  it('should clear the assertive region too when clearing announcements', () => {
+    initAnnouncer();
+    const assertive = document.getElementById('a11y-announcer-assertive');
+    assertive.textContent = 'Stale alert';
+    clearAnnouncements();
+    expect(assertive.textContent).toBe('');
+  });
+
+  it('should announce an empty message without throwing', () => {
+    initAnnouncer();
+    expect(() => announce('')).not.toThrow();
+    expect(() => announce(null)).not.toThrow();
   });
 });

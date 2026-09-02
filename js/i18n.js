@@ -34,6 +34,23 @@ const translations = {
     addToCart: "Añadir al Carrito",
     buyNow: "Comprar Ahora",
     search: "Buscar productos..."
+  },
+  fr: {
+    home: "Accueil",
+    shop: "Boutique",
+    blog: "Blog",
+    about: "A propos",
+    contact: "Contact",
+    cart: "Panier",
+    wishlist: "Liste de souhaits",
+    login: "Connexion",
+    promotions: "Promotions",
+    community: "Communaute",
+    orders: "Mes Commandes",
+    outfit: "Verificateur de Tenue",
+    addToCart: "Ajouter au Panier",
+    buyNow: "Acheter Maintenant",
+    search: "Rechercher des produits..."
   }
 };
 
@@ -91,3 +108,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 });
+
+
+function formatI18nPlaceholder(template, params = {}) { if (!template) return ''; return template.replace(/\{{(\w+)\}}/g, (_, key) => params[key] || ''); }

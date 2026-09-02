@@ -145,6 +145,13 @@ describe('A11y Validation Audit', () => {
       expect(warnings.length).toBe(0);
     });
 
+    it('does not flag inputs with aria-labelledby pointing to a label', () => {
+      document.body.innerHTML =
+        '<span id="search-title">Search</span><input type="text" aria-labelledby="search-title" />';
+      const { warnings } = runA11yAudit(document);
+      expect(warnings.length).toBe(0);
+    });
+
     it('skips hidden inputs', () => {
       document.body.innerHTML = '<input type="hidden" name="token" value="abc" />';
       const { warnings } = runA11yAudit(document);
@@ -168,4 +175,12 @@ describe('A11y Validation Audit', () => {
       expect(warnings.length).toBe(1); // input without label
     });
   });
+
+  it('should detect images missing alt text attributes and record error', () => {
+    const doc = document.createElement('div');
+    doc.innerHTML = '<img src="test.jpg">';
+    const results = runA11yAudit(doc);
+    expect(results.errors.length).toBe(1);
+  });
+
 });

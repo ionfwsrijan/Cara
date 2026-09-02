@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, JSON, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, JSON, Boolean, DateTime, UniqueConstraint
 from sqlalchemy.orm import relationship
 from .database import Base
 from datetime import datetime, timezone
@@ -75,6 +75,13 @@ class User(Base):
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        UniqueConstraint(
+            "email",
+            "idempotency_key",
+            name="uq_orders_email_idempotency_key",
+        ),
+    )
     id = Column(Integer, primary_key=True, index=True)
     full_name = Column(String, nullable=False)
     email = Column(String, nullable=False)
@@ -84,7 +91,17 @@ class Order(Base):
     total_amount = Column(Float, nullable=False)
     status = Column(String, default="PENDING")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    idempotency_key = Column(String, unique=True, index=True, nullable=True)
+    # Captured exactly once when the carrier marks the order DELIVERED; the
+    # estimated return deadline is computed as delivered_at + return window.
+    delivered_at = Column(DateTime, nullable=True)
+    # Uniqueness is scoped per buyer email via uq_orders_email_idempotency_key
+    idempotency_key = Column(String, index=True, nullable=True)
+
+    def mark_delivered(self) -> None:
+        """Transition to DELIVERED, capturing the delivery timestamp once."""
+        if self.delivered_at is None:
+            self.delivered_at = datetime.now(timezone.utc)
+        self.status = "DELIVERED"
 
 class PasswordResetToken(Base):
     __tablename__ = "password_reset_tokens"
@@ -98,6 +115,19 @@ class PasswordResetToken(Base):
     user = relationship("User")
 
 
+class RefreshSession(Base):
+    __tablename__ = "refresh_sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    refresh_jti = Column(String, unique=True, index=True, nullable=False)
+    device_info = Column(String, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+
+    user = relationship("User")
+
+
 class OrderItem(Base):
     __tablename__ = "order_items"
     id = Column(Integer, primary_key=True, index=True)
@@ -106,7 +136,10 @@ class OrderItem(Base):
         ForeignKey("orders.id"),
         nullable=False
     )
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
+    # Denormalized snapshot kept for order history after renames/deletes.
     product_name = Column(String, nullable=False)
     quantity = Column(Integer, nullable=False)
     price = Column(Float, nullable=False)
     order = relationship("Order")
+    product = relationship("Product")

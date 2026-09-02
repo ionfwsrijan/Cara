@@ -1,4 +1,40 @@
+import { createFocusTrap } from './js/a11y-focus-trap.js';
 let checkoutIdempotencyKey = null;
+let checkoutWakeLock = null;
+let isCheckoutProcessing = false;
+
+async function requestWakeLock() {
+  if ('wakeLock' in navigator && isCheckoutProcessing) {
+    try {
+      checkoutWakeLock = await navigator.wakeLock.request('screen');
+      checkoutWakeLock.addEventListener('release', () => {
+        console.log('Screen Wake Lock released');
+      });
+      console.log('Screen Wake Lock acquired');
+    } catch (err) {
+      console.error(`Wake Lock error: ${err.name}, ${err.message}`);
+    }
+  }
+}
+
+function releaseWakeLock() {
+  isCheckoutProcessing = false;
+  if (checkoutWakeLock !== null) {
+    checkoutWakeLock.release()
+      .catch(err => console.error(err))
+      .finally(() => {
+        checkoutWakeLock = null;
+      });
+  }
+}
+
+window.addEventListener('beforeunload', releaseWakeLock);
+window.addEventListener('unload', releaseWakeLock);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && isCheckoutProcessing) {
+    requestWakeLock();
+  }
+});
 
 function safeParseJSON(key, fallback = '[]') {
   try {
@@ -23,6 +59,33 @@ function buildAuthHeaders(extraHeaders = {}) {
   // browser attaches automatically because these fetch calls use
   // credentials: 'include'. There is nothing to read from localStorage.
   return { ...extraHeaders };
+}
+
+async function resolveCartProductIds(cart) {
+  const res = await fetch(`${API_BASE_URL}/api/products/`, {
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    throw new Error('Failed to load products for checkout');
+  }
+  const products = await res.json();
+  const byId = new Map(products.map((p) => [p.id, p]));
+  const byName = new Map();
+  for (const p of products) {
+    if (!byName.has(p.name)) byName.set(p.name, p.id);
+  }
+
+  return cart.map((item) => {
+    const candidate = Number(item.id);
+    if (item.id != null && item.id !== '' && !Number.isNaN(candidate) && byId.has(candidate)) {
+      return { ...item, id: candidate };
+    }
+    const resolved = byName.get(item.name);
+    if (resolved == null) {
+      throw new Error(`Product not found for cart item: ${item.name}`);
+    }
+    return { ...item, id: resolved };
+  });
 }
 
 const paymentMethod = document.getElementById('paymentMethod');
@@ -205,8 +268,20 @@ cardName.addEventListener('input', function () {
 });
 
 // --- Show/Hide Card Details and clear validation states ---
-paymentMethod.addEventListener('change', function () {
-  if (this.value === 'online') {
+function applyPaymentMethod(method) {
+  const value = method === 'online' ? 'online' : 'cod';
+  if (paymentMethod) {
+    paymentMethod.value = value;
+  }
+
+  const tabCod = document.getElementById('tabCOD');
+  const tabOnline = document.getElementById('tabOnline');
+  if (tabCod && tabOnline) {
+    tabCod.classList.toggle('active', value === 'cod');
+    tabOnline.classList.toggle('active', value === 'online');
+  }
+
+  if (value === 'online') {
     cardDetails.style.display = 'block';
     cardName.required = true;
     cardNumber.required = true;
@@ -228,9 +303,17 @@ paymentMethod.addEventListener('change', function () {
     });
   }
 
-  if (this.classList.contains('is-invalid')) {
-    validateField(this);
+  if (paymentMethod && paymentMethod.classList.contains('is-invalid')) {
+    validateField(paymentMethod);
   }
+}
+
+window.selectPayment = function (method) {
+  applyPaymentMethod(method);
+};
+
+paymentMethod.addEventListener('change', function () {
+  applyPaymentMethod(this.value);
 });
 
 // --- Form Submission & Final Validation Check ---
@@ -316,35 +399,41 @@ function submitCheckoutForm() {
     submitBtn.disabled = true;
   }
 
+  isCheckoutProcessing = true;
+  requestWakeLock();
+
   if (!checkoutIdempotencyKey) {
     checkoutIdempotencyKey = crypto.randomUUID();
   }
 
-  // Prepare order data
-  const orderData = {
-    fullName: document.getElementById('fullName').value.trim(),
-    email: document.getElementById('email').value.trim(),
-    address: document.getElementById('address').value.trim(),
-    city: document.getElementById('city').value.trim(),
-    zip: document.getElementById('zip').value.trim(),
-    coupon: window.appliedCoupon,
-    idempotency_key: checkoutIdempotencyKey,
-    items: cart.map((item) => ({
-      product_name: item.name,
-      quantity: parseInt(item.quantity, 10) || 1,
-      price: item.price,
-    })),
-  };
+  resolveCartProductIds(cart)
+    .then((resolvedCart) => {
+      cart = resolvedCart;
+      // Prepare order data — server looks up price/name by product_id
+      const orderData = {
+        fullName: document.getElementById('fullName').value.trim(),
+        email: document.getElementById('email').value.trim(),
+        address: document.getElementById('address').value.trim(),
+        city: document.getElementById('city').value.trim(),
+        zip: document.getElementById('zip').value.trim(),
+        coupon: window.appliedCoupon,
+        idempotency_key: checkoutIdempotencyKey,
+        items: cart.map((item) => ({
+          product_id: Number(item.id),
+          quantity: parseInt(item.quantity, 10) || 1,
+        })),
+      };
 
-  fetch(`${API_BASE_URL}/api/orders/`, {
-    method: 'POST',
-    headers: buildAuthHeaders({
-      'Content-Type': 'application/json',
-      'Idempotency-Key': checkoutIdempotencyKey,
-    }),
-    credentials: 'include',
-    body: JSON.stringify(orderData),
-  })
+      return fetch(`${API_BASE_URL}/api/orders/`, {
+        method: 'POST',
+        headers: buildAuthHeaders({
+          'Content-Type': 'application/json',
+          'Idempotency-Key': checkoutIdempotencyKey,
+        }),
+        credentials: 'include',
+        body: JSON.stringify(orderData),
+      });
+    })
     .then((res) =>
       res
         .json()
@@ -383,6 +472,10 @@ function submitCheckoutForm() {
       window.appliedCoupon = null;
       checkoutIdempotencyKey = null;
 
+      if (typeof window.updateCartCount === 'function') {
+        window.updateCartCount();
+      }
+
       if (submitBtn) {
         submitBtn.classList.remove('btn-loading');
         submitBtn.disabled = false;
@@ -392,11 +485,13 @@ function submitCheckoutForm() {
           submitBtn.getAttribute('data-original-html') || 'Place Order';
       }
 
+      releaseWakeLock();
+
       form.reset();
 
       // HIDE CARD DETAILS AGAIN
       cardDetails.style.display = 'none';
-      if (popup) popup.classList.add('show');
+      openSuccessPopup();
 
       // Clear all validation states post-submit
       inputs.forEach((input) => {
@@ -414,12 +509,33 @@ function submitCheckoutForm() {
         submitBtn.classList.remove('btn-loading');
         submitBtn.disabled = false;
       }
+      
+      releaseWakeLock();
     });
+}
+
+let successFocusTrap = null;
+
+function openSuccessPopup() {
+  const popup = document.getElementById('successPopup');
+  const dialog = popup ? popup.querySelector('.popup-box') : null;
+  if (!popup || !dialog) return;
+
+  popup.hidden = false;
+  popup.classList.add('show');
+  successFocusTrap = createFocusTrap(dialog);
+  successFocusTrap.activate();
 }
 
 window.closePopup = function () {
   const popup = document.getElementById('successPopup');
-  if (popup) popup.classList.remove('show');
+  if (!popup) return;
+  popup.classList.remove('show');
+  popup.hidden = true;
+  if (successFocusTrap) {
+    successFocusTrap.deactivate();
+    successFocusTrap = null;
+  }
 };
 
 function parsePriceString(priceStr) {
@@ -459,7 +575,7 @@ function renderCheckoutItems() {
       return `
       <div class="order-item" style="display: flex; gap: 15px; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;">
         <div class="item-thumb" style="width: 50px; height: 50px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; background: #fff;">
-          <img src="${item.img || 'images/products/placeholder.jpg'}" alt="${item.name}" style="max-width: 100%; max-height: 100%; object-fit: cover;" onerror="this.src='images/products/placeholder.jpg'">
+          <img src="${item.image || item.img || 'images/products/placeholder.jpg'}" alt="${item.name}" style="max-width: 100%; max-height: 100%; object-fit: cover;" onerror="this.src='images/products/placeholder.jpg'">
         </div>
         <div class="item-info" style="flex: 1;">
           <div class="item-name" style="font-weight: 600; font-size: 14px; color: var(--color-heading);">${item.name}</div>
@@ -481,6 +597,7 @@ window.updateCheckoutSummary = function () {
       sum + Math.round(parsePriceString(item.price) * 100) * (parseInt(item.quantity, 10) || 1),
     0,
   );
+  const subtotal = subtotalCents / 100;
 
   // Check coupon discount
   const couponCode = localStorage.getItem('appliedCoupon') || '';
@@ -505,6 +622,11 @@ window.updateCheckoutSummary = function () {
   const loyaltyPoints =
     parseInt(localStorage.getItem('cara_applied_loyalty_points'), 10) || 0;
   const loyaltyDiscount = loyaltyPoints / (window.CARA_CONFIG ? window.CARA_CONFIG.LOYALTY.POINTS_PER_RUPEE : 10);
+
+  const taxCents = Math.round(subtotalCents * (window.CARA_CONFIG ? window.CARA_CONFIG.TAX_RATE : 0.18));
+  const giftChargeCents = Math.round(giftCharge * 100);
+  const urgencyDiscountCents = Math.round(urgencyDiscount * 100);
+  const loyaltyDiscountCents = Math.round(loyaltyDiscount * 100);
 
   // Grand Total in cents (integer, safe for Stripe)
   const grandTotalCents = Math.max(
@@ -577,7 +699,7 @@ window.updateCheckoutSummary = function () {
       const divider = document.querySelector('.summary-divider');
       if (divider) divider.parentNode.insertBefore(urgencyRow, divider);
     }
-    urgencyRow.innerHTML = `<span>Urgency Promo (${window.CARA_CONFIG ? window.CARA_CONFIG.URGENCY_DISCOUNT_PCT * 100 : 5}%)</span><span id='urgency-discount-val'>-${formatCurrency(urgencyDiscount)}</span>`;
+    urgencyRow.innerHTML = `<span>Urgency Promo (${window.CARA_CONFIG ? window.CARA_CONFIG.URGENCY_DISCOUNT_PCT * 100 : 5}%)</span><span id='urgency-discount-val'>-${formatCurrency(urgencyDiscountCents)}</span>`;
   } else {
     if (urgencyRow) urgencyRow.remove();
   }
@@ -653,11 +775,30 @@ function highlightError(el) {
 // Call init on DOM ready
 function initCheckoutPage() {
   initCheckoutValidation();
+  prefillAccountEmail();
 
   CaraErrorBoundary.wrap('#checkoutForm', function () {
     renderCheckoutItems();
     window.updateCheckoutSummary();
   });
+}
+
+function prefillAccountEmail() {
+  const emailInput = document.getElementById('email');
+  if (!emailInput) return;
+
+  fetch(`${API_BASE_URL}/api/auth/me`, { credentials: 'include' })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((data) => {
+      if (!data || !data.email) return;
+      emailInput.value = data.email;
+      emailInput.readOnly = true;
+      emailInput.setAttribute('aria-readonly', 'true');
+      emailInput.title = 'Orders are tied to your account email';
+    })
+    .catch(() => {
+      /* anonymous / offline — leave the field editable until submit auth fails */
+    });
 }
 
 document.addEventListener('DOMContentLoaded', initCheckoutPage);
@@ -675,12 +816,22 @@ window.addEventListener('couponRemoved', () => {
   window.updateCheckoutSummary();
 });
 
-// ── Close popup when clicking outside the box ─────────────
+// ── Close popup when clicking outside the box / Escape ─────────────
 const successOverlay = document.getElementById('successPopup');
 if (successOverlay) {
   successOverlay.addEventListener('click', function (e) {
-    if (e.target === this) this.classList.remove('show');
+    if (e.target === this) window.closePopup();
   });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && successOverlay.classList.contains('show')) {
+      window.closePopup();
+    }
+  });
+  const continueBtn = document.getElementById('successContinueBtn');
+  if (continueBtn) {
+    continueBtn.addEventListener('click', function () {
+      window.location.href = 'shop.html';
+    });
+  }
 }
 // Advanced validation routines checking postal formats and shipping address boundaries.
-console.log("Checkout script updated with Vault integration.");

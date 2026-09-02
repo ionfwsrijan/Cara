@@ -33,4 +33,21 @@ document.addEventListener('DOMContentLoaded', () => {
       window.updateCheckoutSummary();
     }
   });
+
+  // Wire up gift message validation to the textarea
+  const giftMsgInput = giftMsgArea ? giftMsgArea.querySelector('textarea') : null;
+  if (giftMsgInput) {
+    giftMsgInput.addEventListener('input', () => {
+      const valid = validateGiftMessageLength(giftMsgInput.value, 200);
+      if (!valid) {
+        giftMsgInput.setCustomValidity('Gift message exceeds the 200-character limit.');
+        giftMsgInput.reportValidity();
+      } else {
+        giftMsgInput.setCustomValidity('');
+      }
+    });
+  }
 });
+
+
+function validateGiftMessageLength(message, maxChars = 200) { if (!message || typeof message !== 'string') return true; return message.trim().length <= maxChars; }

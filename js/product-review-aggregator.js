@@ -60,17 +60,28 @@ class ProductReviewAggregator {
       return { count: 0, average: 0, distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } };
     }
 
+    // Filter out reviews with corrupt ratings before computing stats.
+    const validReviews = productReviews.filter(
+      (r) =>
+        typeof r.rating === 'number' &&
+        Number.isInteger(r.rating) &&
+        r.rating >= 1 &&
+        r.rating <= 5,
+    );
+
     const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
     let total = 0;
 
-    productReviews.forEach((review) => {
+    validReviews.forEach((review) => {
       total += review.rating;
       distribution[review.rating] = (distribution[review.rating] || 0) + 1;
     });
 
     return {
-      count: productReviews.length,
-      average: parseFloat((total / productReviews.length).toFixed(1)),
+      count: validReviews.length,
+      average: validReviews.length > 0
+        ? parseFloat((total / validReviews.length).toFixed(1))
+        : 0,
       distribution
     };
   }
@@ -98,6 +109,26 @@ class ProductReviewAggregator {
       return { success: true, helpful: review.helpful };
     }
     return { success: false };
+  }
+
+  /**
+   * Calculates the percentage distribution of star ratings (1-5) for a product.
+   * @param {string} productId
+   * @returns {Object} Map of star level (1-5) to percentage (0-100).
+   */
+  calculateReviewRatingBreakdown(productId) {
+    const stats = this.getStats(productId);
+    const total = stats.count;
+    if (total === 0) {
+      return { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    }
+    return {
+      1: Math.round((stats.distribution[1] / total) * 100),
+      2: Math.round((stats.distribution[2] / total) * 100),
+      3: Math.round((stats.distribution[3] / total) * 100),
+      4: Math.round((stats.distribution[4] / total) * 100),
+      5: Math.round((stats.distribution[5] / total) * 100),
+    };
   }
 }
 

@@ -21,57 +21,13 @@ def get_products(
     return db.query(models.Product).offset(skip).limit(limit).all()
 
 
-@router.get("/{product_id}", response_model=schemas.Product)
-def get_product(product_id: int, db: Session = Depends(get_db)):
-    product = db.query(models.Product).filter(models.Product.id == product_id).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    return product
-
-
-@router.post("/checkout")
-def checkout_cart(request: schemas.CheckoutRequest, db: Session = Depends(get_db)):
-    # Sort items to prevent deadlocks when locking multiple rows
-    items = sorted(request.items, key=lambda x: x.name)
-
-    try:
-        # Atomic block
-        for item in items:
-            product = db.query(models.Product).filter(
-                models.Product.name == item.name
-            ).with_for_update().first()
-
-            if not product:
-                db.rollback()
-                raise HTTPException(status_code=400, detail=f"Product '{item.name}' not found")
-
-            if product.stock < item.quantity:
-                db.rollback()
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Insufficient stock for '{product.name}'. Only {product.stock} remaining.",
-                )
-
-            product.stock -= item.quantity
-
-        db.commit()
-        return {"status": "success", "message": "Order placed successfully"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Internal server error during checkout: {str(e)}")
-
-
 # ---------------------------------------------------------------------------
-# New: Search & Filter endpoint
+# Search & Filter endpoints (literal paths must be registered before /{product_id})
 # ---------------------------------------------------------------------------
 
 class ProductSearchResponse:
     """Non-Pydantic helper — response is built as a plain dict for flexibility."""
     pass
-
 
 @router.get("/search/query", response_model=schemas.PaginatedProductsResponse)
 def search_products(
@@ -217,3 +173,16 @@ def get_category_summary(db: Session = Depends(get_db)) -> dict:
             "max": price_range[1] if price_range[1] is not None else 0,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Product by ID (must stay after literal /search/* paths)
+# ---------------------------------------------------------------------------
+
+@router.get("/{product_id}", response_model=schemas.Product)
+def get_product(product_id: int, db: Session = Depends(get_db)):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return product
+

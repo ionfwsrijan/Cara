@@ -66,8 +66,9 @@ export class ProductFacetFilter {
 
   parseQueryParams(queryString) {
     const params = new URLSearchParams(queryString);
+    const rawCategories = params.get('categories');
     const filters = {
-      category: params.get('categories') ? params.get('categories').split(',') : [],
+      category: rawCategories ? rawCategories.split(',').filter((c) => c.length > 0) : [],
       minPrice: parseFloat(params.get('minPrice')) || 0,
       maxPrice: parseFloat(params.get('maxPrice')) || Infinity,
       minRating: parseFloat(params.get('minRating')) || 0,
@@ -87,4 +88,18 @@ export class ProductFacetFilter {
     };
     return this.products;
   }
+
+  /**
+   * Checks whether a price falls within a given min/max range.
+   * @param {number} price
+   * @param {number} minPrice
+   * @param {number} maxPrice
+   * @returns {boolean}
+   */
+  isPriceInFacetRange(price, minPrice = 0, maxPrice = Infinity) {
+    if (typeof price !== 'number' || Number.isNaN(price)) return false;
+    const p = price;
+    return p >= minPrice && p <= maxPrice;
+  }
+
 }
